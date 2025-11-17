@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  keycloak_db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: keycloak_db
+      POSTGRES_USER: keycloak_user
+      POSTGRES_PASSWORD: keycloak_password
+    volumes:
+      - ./postgres-keycloak-data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.0
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
+      KC_DB_USERNAME: keycloak_user
+      KC_DB_PASSWORD: keycloak_password
+    command: 
+      - start-dev
+      - --import-realm
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
+    ports:
+      - "8080:8080"
+    depends_on:
+      - keycloak_db
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:3010
+  bionicpro-auth:
+    build:
+      context: ./bionicpro-auth        
+      dockerfile: Dockerfile
+    environment:
+      AUTH_KEYCLOAK_BASE_URL: http://localhost:8080
+      AUTH_KEYCLOAK_REALM: reports-realm
+      AUTH_KEYCLOAK_CLIENT_ID: bionicpro-auth
+      AUTH_KEYCLOAK_CLIENT_SECRET: LLaCe34E5OcwCmQil0sGj62/auBmXZGiM0rHvlYA2Js=
+      AUTH_SESSION_LIFETIME_SECONDS: 600        
+      AUTH_ACCESS_TOKEN_LIFETIME: 120          
+      AUTH_REFRESH_ROTATION: "true"
+    ports:
+      - "3010:3010"
+    depends_on:
+      - keycloak
+  ldap:
+    image: osixia/openldap:1.5.0
+    container_name: openldap
+    command: ["--copy-service", "--loglevel", "debug"]
+    environment:
+      LDAP_ORGANISATION: "BionicPRO"
+      LDAP_DOMAIN: "example.com"
+      LDAP_ADMIN_PASSWORD: admin
+      LDAP_TLS_VERIFY_CLIENT: try
+    ports:
+      - "389:389"
+      - "636:636"
+    volumes:
+      - ./ldap/config.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/config.ldif
