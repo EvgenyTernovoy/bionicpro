@@ -2,10 +2,11 @@
 import os
 import uuid
 import time
+import sys
 import json
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
-
+from jose import jwt, JWTError
 from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from fastapi.responses import RedirectResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -13,21 +14,38 @@ import httpx
 import redis
 from cryptography.fernet import Fernet
 from fastapi.middleware.cors import CORSMiddleware
+import logging
 
+logging.basicConfig(
+    level=logging.DEBUG,  # или INFO
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],  # важно для Docker!
+)
+
+logger = logging.getLogger("auth")
 # --------------------
 # Конфигурация (env)
 # --------------------
 KEYCLOAK_URL = os.getenv("AUTH_KEYCLOAK_BASE_URL", "https://keycloak.example.com/auth")
+KEYCLOAK_CONTAINER_URL = os.getenv(
+    "AUTH_KEYCLOAK_CONTAINER_URL", "http://keycloak:8080"
+)
 REALM = os.getenv("AUTH_KEYCLOAK_REALM", "myrealm")
 CLIENT_ID = os.getenv("AUTH_KEYCLOAK_CLIENT_ID", "bionicpro-auth")
-CLIENT_SECRET = os.getenv("AUTH_KEYCLOAK_CLIENT_SECRET", "")  # confidential client secret
+CLIENT_SECRET = os.getenv(
+    "AUTH_KEYCLOAK_CLIENT_SECRET", ""
+)  # confidential client secret
 BIONIC_HOST = os.getenv("BIONIC_HOST", "localhost:3010")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SESSION_COOKIE_NAME = "bionicpro_session"
 SESSION_COOKIE_SECURE = False  # True in prod; False only for local http dev
 SESSION_COOKIE_SAMESITE = "Lax"  # or "Strict"
-SESSION_MAX_AGE = int(os.getenv("AUTH_SESSION_LIFETIME_SECONDS", 60 * 30))  # seconds, > access token life
-ACCESS_TOKEN_LIFESPAN = int(os.getenv("AUTH_ACCESS_TOKEN_LIFETIME", 120))  # seconds (<= 2 min)
+SESSION_MAX_AGE = int(
+    os.getenv("AUTH_SESSION_LIFETIME_SECONDS", 60 * 30)
+)  # seconds, > access token life
+ACCESS_TOKEN_LIFESPAN = int(
+    os.getenv("AUTH_ACCESS_TOKEN_LIFETIME", 120)
+)  # seconds (<= 2 min)
 
 FERNET_KEY = os.getenv("FERNET_KEY") or Fernet.generate_key().decode()
 fernet = Fernet(FERNET_KEY.encode())
@@ -48,6 +66,7 @@ except Exception as e:
 _in_memory_sessions: Dict[str, Dict[str, Any]] = {}
 _in_memory_tokens: Dict[str, Dict[str, Any]] = {}
 
+
 # --------------------
 # Утилиты хранилища
 # --------------------
@@ -59,6 +78,7 @@ def _store_session(session_id: str, payload: dict, ttl: Optional[int] = None):
     else:
         _in_memory_sessions[session_id] = payload
 
+
 def _get_session(session_id: str) -> Optional[dict]:
     if use_redis:
         v = redis_client.get(f"session:{session_id}")
@@ -66,20 +86,32 @@ def _get_session(session_id: str) -> Optional[dict]:
     else:
         return _in_memory_sessions.get(session_id)
 
+
 def _delete_session(session_id: str):
     if use_redis:
         redis_client.delete(f"session:{session_id}")
     else:
         _in_memory_sessions.pop(session_id, None)
 
-def _store_tokens(session_id: str, access_token: dict, refresh_token_enc: str, ttl: Optional[int] = None):
-    payload = {"access_token": access_token, "refresh_token_enc": refresh_token_enc, "updated_at": int(time.time())}
+
+def _store_tokens(
+    session_id: str,
+    access_token: dict,
+    refresh_token_enc: str,
+    ttl: Optional[int] = None,
+):
+    payload = {
+        "access_token": access_token,
+        "refresh_token_enc": refresh_token_enc,
+        "updated_at": int(time.time()),
+    }
     if use_redis:
         redis_client.set(f"tokens:{session_id}", json.dumps(payload))
         if ttl:
             redis_client.expire(f"tokens:{session_id}", ttl)
     else:
         _in_memory_tokens[session_id] = payload
+
 
 def _get_tokens(session_id: str) -> Optional[dict]:
     if use_redis:
@@ -88,18 +120,36 @@ def _get_tokens(session_id: str) -> Optional[dict]:
     else:
         return _in_memory_tokens.get(session_id)
 
+
 def _delete_tokens(session_id: str):
     if use_redis:
         redis_client.delete(f"tokens:{session_id}")
     else:
         _in_memory_tokens.pop(session_id, None)
 
+
+async def load_userinfo(access_token: str):
+    async with httpx.AsyncClient() as client:
+        logger.info(f"Token: {access_token}")
+
+        resp = await client.get(
+            USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10.0,
+        )
+    if resp.status_code != 200:
+        return None
+    return resp.json()
+
+
 # --------------------
 # Keycloak endpoints
 # --------------------
 AUTH_URL = f"{KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/auth"
 TOKEN_URL = f"http://keycloak:8080/realms/{REALM}/protocol/openid-connect/token"
-USERINFO_URL = f"{KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/userinfo"
+USERINFO_URL = (
+    f"{KEYCLOAK_CONTAINER_URL}/realms/{REALM}/protocol/openid-connect/userinfo"
+)
 
 # --------------------
 # FastAPI app
@@ -112,11 +162,12 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,           
-    allow_credentials=True,          
-    allow_methods=["*"],             
-    allow_headers=["*"],             
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
 
 # --------------------
 # Helper: build auth redirect
@@ -130,8 +181,10 @@ def build_auth_redirect(state: str, redirect_uri: str):
         "state": state,
     }
     import urllib.parse
+
     url = AUTH_URL + "?" + urllib.parse.urlencode(params)
     return url
+
 
 # --------------------
 # Login: redirect to Keycloak
@@ -143,6 +196,7 @@ async def login():
     url = build_auth_redirect(state, redirect_uri)
     # store state somewhere if needed (for CSRF) — here we skip storage for brevity
     return RedirectResponse(url)
+
 
 # --------------------
 # Callback: exchange code -> tokens; create session; set cookie
@@ -176,7 +230,8 @@ async def callback(request: Request):
     # store access token metadata (we do not store plaintext refresh token)
     access_token = {
         "token": token_resp["access_token"],
-        "expires_at": int(time.time()) + int(token_resp.get("expires_in", ACCESS_TOKEN_LIFESPAN))
+        "expires_at": int(time.time())
+        + int(token_resp.get("expires_in", ACCESS_TOKEN_LIFESPAN)),
     }
 
     # encrypt refresh token
@@ -189,7 +244,7 @@ async def callback(request: Request):
         "session_id": session_id,
         "created_at": now,
         "last_used": now,
-        "user": None  # can fill by calling userinfo if needed
+        "user": None,  # can fill by calling userinfo if needed
     }
     _store_session(session_id, session_payload, ttl=SESSION_MAX_AGE)
     _store_tokens(session_id, access_token, refresh_token_enc, ttl=SESSION_MAX_AGE)
@@ -205,6 +260,7 @@ async def callback(request: Request):
         max_age=SESSION_MAX_AGE,
     )
     return response
+
 
 # --------------------
 # Utility: refresh access token using refresh_token
@@ -236,11 +292,13 @@ async def refresh_access_token(session_id: str) -> bool:
     # update stored tokens (encrypt new refresh token)
     new_access = {
         "token": new_tokens["access_token"],
-        "expires_at": int(time.time()) + int(new_tokens.get("expires_in", ACCESS_TOKEN_LIFESPAN))
+        "expires_at": int(time.time())
+        + int(new_tokens.get("expires_in", ACCESS_TOKEN_LIFESPAN)),
     }
     new_refresh_enc = fernet.encrypt(new_tokens["refresh_token"].encode()).decode()
     _store_tokens(session_id, new_access, new_refresh_enc, ttl=SESSION_MAX_AGE)
     return True
+
 
 # --------------------
 # Middleware: attach session to request.state (simple)
@@ -260,7 +318,9 @@ class SessionMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         return response
 
+
 app.add_middleware(SessionMiddleware)
+
 
 # --------------------
 # Helper: ensure authenticated, refresh if needed, rotate session
@@ -297,7 +357,12 @@ async def require_session(request: Request):
     meta["rotated_from"] = session_id
     meta["last_used"] = now
     _store_session(new_session_id, meta, ttl=SESSION_MAX_AGE)
-    _store_tokens(new_session_id, tokens["access_token"], tokens["refresh_token_enc"], ttl=SESSION_MAX_AGE)
+    _store_tokens(
+        new_session_id,
+        tokens["access_token"],
+        tokens["refresh_token_enc"],
+        ttl=SESSION_MAX_AGE,
+    )
     # delete old
     _delete_session(session_id)
     _delete_tokens(session_id)
@@ -305,29 +370,42 @@ async def require_session(request: Request):
     # set cookie in response via returning this info
     return {"new_session_id": new_session_id, "meta": meta, "tokens": tokens}
 
-# --------------------
-# Protected endpoint sample
-# --------------------
+
 @app.get("/api/protected")
 async def protected(request: Request):
+    # 1. Проверяем сессию
     try:
         result = await require_session(request)
     except HTTPException as e:
         raise e
 
-    # Build response
     new_session_id = result["new_session_id"]
-    # update cookie and return user info or protected payload
-    resp = JSONResponse({"ok": True, "session_id": new_session_id})
-    resp.set_cookie(
-        key=SESSION_COOKIE_NAME,
-        value=new_session_id,
-        httponly=True,
-        secure=SESSION_COOKIE_SECURE,
-        samesite=SESSION_COOKIE_SAMESITE,
-        max_age=SESSION_MAX_AGE,
+    access_token = result["tokens"]["access_token"]["token"]
+
+    # 2. Читаем payload без проверки подписи
+    try:
+        payload = jwt.get_unverified_claims(access_token)
+    except Exception:
+        raise HTTPException(401, "Cannot decode access_token")
+
+    # 3. Определяем user_id (email предпочтительнее)
+    user_id = (
+        payload.get("email") or payload.get("preferred_username") or payload.get("sub")
     )
-    return resp
+
+    if not user_id:
+        raise HTTPException(500, "Cannot extract user identifier from token")
+
+    # 4. Возвращаем данные
+    return JSONResponse(
+        {
+            "ok": True,
+            "session_id": new_session_id,
+            "user_id": user_id,
+            "user": payload,
+        }
+    )
+
 
 # --------------------
 # Logout

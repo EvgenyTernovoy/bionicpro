@@ -1,5 +1,37 @@
 version: '3.8'
 
+x-airflow-common: &airflow-common
+  build:
+    context: ./dags
+    dockerfile: Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor #локальный запуск
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres_dag/airflow
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres_dag/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__WEBSERVER__SECRET_KEY: 'your_airflow_webserver_sec_key'
+    AIRFLOW__WEBSERVER__BASE_URL: http://localhost:8090
+    _PIP_ADDITIONAL_REQUIREMENTS: ''
+    AIRFLOW_INPUT_DIR: '/opt/airflow/dag-inputs'
+    AIRFLOW_CONN_CRM_API: "http://bionicpro-crm:3020"
+    AIRFLOW_CONN_RAW_DB: "postgresql://airflow:airflow@telemetry_db:5432/telemetry"
+    AIRFLOW_CONN_OLAP: "postgresql://airflow:airflow@postgres_dag:5432/olap"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./dags/sql:/opt/airflow/dags/sql
+    - ./dags/requirements.txt:/opt/airflow/requirements.txt
+    - ./dags/data:/opt/airflow/sample_files
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres_dag:
+      condition: service_healthy
+  networks:
+    - dag_sample
+
 services:
   keycloak_db:
     image: postgres:14
@@ -10,9 +42,12 @@ services:
     volumes:
       - ./postgres-keycloak-data:/var/lib/postgresql/data
     ports:
-      - "5433:5432"
+      - "5432:5432"
+    networks:
+      - dag_sample
   keycloak:
     image: quay.io/keycloak/keycloak:26.4.0
+    container_name: keycloak
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
@@ -29,6 +64,8 @@ services:
       - "8080:8080"
     depends_on:
       - keycloak_db
+    networks:
+      - dag_sample
   frontend:
     build:
       context: ./frontend
@@ -36,11 +73,15 @@ services:
     ports:
       - "3000:3000"
     environment:
-      REACT_APP_API_URL: http://localhost:3010
+      REACT_APP_API_URL: http://localhost:3030
+      REACT_APP_AUTH_URL: http://localhost:3010
+    networks:
+      - dag_sample
   bionicpro-auth:
     build:
       context: ./bionicpro-auth        
       dockerfile: Dockerfile
+    container_name: bionicpro-auth
     environment:
       AUTH_KEYCLOAK_BASE_URL: http://localhost:8080
       AUTH_KEYCLOAK_REALM: reports-realm
@@ -53,6 +94,8 @@ services:
       - "3010:3010"
     depends_on:
       - keycloak
+    networks:
+      - dag_sample
   ldap:
     image: osixia/openldap:1.5.0
     container_name: openldap
@@ -67,3 +110,160 @@ services:
       - "636:636"
     volumes:
       - ./ldap/config.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/config.ldif
+    networks:
+      - dag_sample
+  bionicpro-crm:
+    build:
+      context: ./bionicpro-crm        
+      dockerfile: Dockerfile
+    container_name: bionicpro-crm
+    ports:
+      - "3020:3020"
+    networks:
+      - dag_sample
+
+  bionicpro-report:
+    build:
+      context: ./bionicpro-report        
+      dockerfile: Dockerfile
+    container_name: bionicpro-report
+    ports:
+      - "3030:3030"
+    networks:
+      - dag_sample
+    
+  telemetry_db:
+    image: postgres:15
+    container_name: telemetry_db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: telemetry
+    volumes:
+      - ./bionicpro-telemetry/pgdata:/var/lib/postgresql/data
+      - ./bionicpro-telemetry/sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - dag_sample
+  telemetry:
+    build: ./bionicpro-telemetry
+    container_name: telemetry-service
+    depends_on:
+      - telemetry_db
+    environment:
+      DATABASE_URL: postgresql://airflow:airflow@telemetry_db:5432/telemetry
+    ports:
+      - "9100:9100"
+    networks:
+      - dag_sample
+
+  postgres_dag:
+    image: postgres:16.0
+    container_name: postgres_dag
+    volumes:
+      - ./dags/db/init-db.sql:/docker-entrypoint-initdb.d/db.sql
+      - airflow_db_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - airflow
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+    networks:
+      - dag_sample
+  airflow-webserver:
+    <<: *airflow-common
+    ports:
+      - "8090:8080"
+    depends_on:
+      postgres_dag:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: webserver
+    networks:
+      - dag_sample
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  airflow-scheduler:
+    <<: *airflow-common
+    networks:
+      - dag_sample
+    command: scheduler
+    depends_on:
+      postgres_dag:
+        condition: service_healthy
+      airflow-webserver:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  airflow-triggerer:
+    <<: *airflow-common
+    depends_on:
+      postgres_dag:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - dag_sample
+    command: bash -c "airflow triggerer"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - airflow jobs check --job-type TriggererJob --hostname "${HOSTNAME}"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+
+  airflow-cli:
+    <<: *airflow-common
+    depends_on:
+      postgres_dag:
+        condition: service_healthy
+    networks:
+      - dag_sample
+    profiles:
+      - debug
+    command:
+      - bash
+      - -c
+      - airflow
+
+  airflow-init:
+    <<: *airflow-common
+    environment:
+      <<: *airflow-common-env
+    depends_on:
+      postgres_dag:
+        condition: service_healthy
+    command: >
+      bash -c " airflow db init && airflow users create \ --username admin \ --firstname admin \ --lastname admin \ --role Admin \ --email admin@sample.ru \ --password admin 
+      
+      "
+    networks:
+      - dag_sample
+networks:
+  dag_sample:
+volumes:
+  airflow_db_data:

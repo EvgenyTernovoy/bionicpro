@@ -6,6 +6,7 @@ const ReportPage: React.FC = () => {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
 
   const API_URL = process.env.REACT_APP_API_URL;
+  const AUTH_URL = process.env.REACT_APP_AUTH_URL;
 
   //
   // 1. Проверяем текущую сессию при загрузке страницы
@@ -13,7 +14,7 @@ const ReportPage: React.FC = () => {
   useEffect(() => {
     const checkSession = async () => {
       try {
-        const response = await fetch(`${API_URL}/session`, {
+        const response = await fetch(`${AUTH_URL}/session`, {
           credentials: 'include',
         });
 
@@ -34,7 +35,7 @@ const ReportPage: React.FC = () => {
   // 2. Фронтенд логин → редирект на /auth/login 
   //
   const login = () => {
-    window.location.href = `${API_URL}/login`;
+    window.location.href = `${AUTH_URL}/login`;
   };
 
   //
@@ -47,7 +48,7 @@ const ReportPage: React.FC = () => {
     try {
       const response = await fetch(`${API_URL}/reports`, {
         method: 'GET',
-        credentials: 'include', // обязательно! отправляет cookie
+        credentials: 'include',
       });
 
       if (response.status === 401) {
@@ -65,7 +66,7 @@ const ReportPage: React.FC = () => {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'report.pdf';
+      a.download = 'report.csv';
       a.click();
       window.URL.revokeObjectURL(url);
     } catch (err) {

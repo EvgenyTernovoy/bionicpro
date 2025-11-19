@@ -2,3 +2,5 @@
 2024__yandex-architecture-sso.code-workspace
 .venv
 /node_modules
+pgdata
+__pycache__

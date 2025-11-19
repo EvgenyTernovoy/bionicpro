@@ -4,3 +4,4 @@ httpx
 redis 
 cryptography 
 python-dotenv
+python-jose
