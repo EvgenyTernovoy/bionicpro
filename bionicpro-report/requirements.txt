@@ -3,3 +3,5 @@ uvicorn
 httpx 
 python-dotenv
 asyncpg
+boto3 
+botocore

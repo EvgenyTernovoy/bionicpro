@@ -4,3 +4,4 @@
 /node_modules
 pgdata
 __pycache__
+cache

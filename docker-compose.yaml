@@ -46,7 +46,7 @@ services:
     networks:
       - dag_sample
   keycloak:
-    image: quay.io/keycloak/keycloak:26.4.0
+    image: quay.io/keycloak/keycloak:25.0.0
     container_name: keycloak
     environment:
       KEYCLOAK_ADMIN: admin
@@ -55,6 +55,13 @@ services:
       KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
       KC_DB_USERNAME: keycloak_user
       KC_DB_PASSWORD: keycloak_password
+      KC_PROXY: none
+      PROXY_ADDRESS_FORWARDING: true 
+      KC_HTTP_ENABLED: true
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME_STRICT: false
+      KC_HOSTNAME_STRICT_HTTPS: false
+      KC_HTTPS_REQUIRED: none
     command: 
       - start-dev
       - --import-realm
@@ -127,6 +134,14 @@ services:
       context: ./bionicpro-report        
       dockerfile: Dockerfile
     container_name: bionicpro-report
+    environment:
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_DEFAULT_BUCKET: reports
+      S3_ADDRESSING_STYLE: path
+      S3_MULTIPART_THRESHOLD: 52428800   # 50MB
+      S3_MULTIPART_CHUNKSIZE: 8388608    # 8MB
     ports:
       - "3030:3030"
     networks:
@@ -263,7 +278,60 @@ services:
       "
     networks:
       - dag_sample
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_HTTP_TRACE: "-"
+    ports:
+      - "9000:9000"   # S3 API (optional for host access)
+      - "9001:9001"   # Console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - dag_sample
+
+  minio_init:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+        sleep 5 &&
+        mc alias set myminio http://minio:9000 minioadmin minioadmin &&
+        mc mb myminio/reports &&
+        mc anonymous set download myminio/reports
+      "
+    networks:
+      - dag_sample
+  cdn:
+    image: nginx:1.27
+    container_name: cdn
+    environment:
+      MINIO_USER: minioadmin
+      MINIO_PASSWORD: minioadmin
+    volumes:
+      - ./cdn/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./cdn/cache:/var/cache/nginx
+    ports:
+      - "8081:80"   # внешний CDN endpoint
+    depends_on:
+      - minio
+      - bionicpro-auth
+    networks:
+      - dag_sample
+
 networks:
   dag_sample:
 volumes:
   airflow_db_data:
+  minio_data:

@@ -61,8 +61,24 @@ const ReportPage: React.FC = () => {
         throw new Error(`Error: ${response.status}`);
       }
 
+      console.log("headers: ", response.headers)
+      console.log("response.headers.get: ", response.headers.get("X-User-Email"))
+
+      const fileUrl = (await response.json())?.url;
+
+      const match = fileUrl.match(/\/([^/]+@[^/]+)\//); 
+      const email = match ? match[1] : null;
+
       // скачивание файла
-      const blob = await response.blob();
+      const fileResponse = await fetch(fileUrl, {
+        method: 'GET',
+        credentials: 'include',
+        headers: {
+          "X-User-Email": email,
+        },
+      });
+
+      const blob = await fileResponse.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;

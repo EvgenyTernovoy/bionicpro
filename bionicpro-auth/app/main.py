@@ -438,3 +438,40 @@ async def check_session(request: Request):
             raise HTTPException(status_code=401, detail="Session expired")
 
     return {"ok": True, "user": "example@example.com"}
+
+
+@app.get("/validate")
+async def check_session(request: Request):
+    session_id = request.cookies.get("bionicpro_session")
+    request_email = request.headers.get("x-user-email")
+    logger.info(f"session_id {session_id}")
+    logger.info(f"request_email {request_email}")
+    if not session_id:
+        raise HTTPException(status_code=401, detail="No session")
+
+    tokens = _get_tokens(session_id)
+    logger.info(f"tokens {tokens}")
+
+    if not tokens:
+        raise HTTPException(status_code=401, detail="Session expired")
+
+    access = tokens["access_token"]["token"]
+    logger.info(f"access {access}")
+
+    try:
+        payload = jwt.get_unverified_claims(access)
+    except Exception:
+        raise HTTPException(403, "Cannot decode access_token")
+
+    user_email = payload.get("email")
+    logger.info(f"user_email {user_email}")
+
+    if not user_email:
+        return Response(status_code=403)
+
+    if user_email != request_email:
+        return Response(status_code=403)
+
+    response = Response(status_code=200)
+    response.headers["X-User-Email"] = user_email
+    return response

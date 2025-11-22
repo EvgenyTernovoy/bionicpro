@@ -122,13 +122,17 @@
       "enabled": true,
       "clientAuthenticatorType": "client-secret",
       "secret": "oNwoLQdvJAvRcL89SydqCWCe5ry1jMgq",
-      "bearerOnly": true
+      "bearerOnly": true,
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000"]
     },
     {
       "clientId": "bionicpro-auth",
       "enabled": true,
       "clientAuthenticatorType": "client-secret",
-      "secret": "LLaCe34E5OcwCmQil0sGj62/auBmXZGiM0rHvlYA2Js="
+      "secret": "LLaCe34E5OcwCmQil0sGj62/auBmXZGiM0rHvlYA2Js=",
+      "redirectUris": ["http://localhost:3000/*"],
+      "webOrigins": ["http://localhost:3000"]
     }
   ]
 }
