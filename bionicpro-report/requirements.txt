@@ -5,3 +5,4 @@ python-dotenv
 asyncpg
 boto3 
 botocore
+clickhouse_connect

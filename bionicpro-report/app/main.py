@@ -9,8 +9,8 @@ import logging
 import asyncio
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
-from .s3_client import MinioS3Client  # <-- твой клиент
+from .s3_client import MinioS3Client
+from clickhouse_connect import get_async_client
 
 s3 = MinioS3Client()
 BUCKET = "reports"
@@ -113,28 +113,55 @@ async def download_report(request: Request):
             )
         return resp
 
-    # 4. Генерация отчета из БД
-    conn = await asyncpg.connect(DATABASE_DSN)
-
-    rows = await conn.fetch(
-        """
-        SELECT *
-        FROM mart.client_stats
-        WHERE client_id = $1
-        """,
-        user_id,
+    client = await get_async_client(
+        host="clickhouse", port=8123, username="default", password="default"
     )
 
-    await conn.close()
+    # --- 2. Получаем данные из витрины ---
+    query = f"""
+        SELECT email, metric_type, metric_value, event_time, payload
+        FROM telemetry_metrics
+        WHERE email = '{user_id}'
+    """
+
+    query_result = await client.query(query)
+
+    rows = query_result.result_rows  # список строк
+    column_names = query_result.column_names  # заголовки
+
+    # 4. Генерация отчета из БД
+    # conn = await asyncpg.connect(DATABASE_DSN)
+
+    # rows = await conn.fetch(
+    #     """
+    #     SELECT *
+    #     FROM mart.client_stats
+    #     WHERE client_id = $1
+    #     """,
+    #     user_id,
+    # )
+
+    # await conn.close()
 
     # 5. Формируем CSV
+    # output = io.StringIO()
+    # writer = csv.writer(output)
+    # writer.writerow([col for col in rows[0].keys()] if rows else [])
+    # for r in rows:
+    #     writer.writerow([r[col] for col in r.keys()])
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow([col for col in rows[0].keys()] if rows else [])
+
+    writer.writerow(column_names if rows else [])
+
     for r in rows:
-        writer.writerow([r[col] for col in r.keys()])
+        writer.writerow(r)
+
     csv_data = output.getvalue()
     csv_bytes = csv_data.encode("utf-8")
+
+    # --- Закрываем соединение ---
+    await client.close()
 
     # 6. Загружаем CSV в S3 (multipart автоматически, если нужно)
     await run_in_thread(s3.upload_bytes, key, csv_bytes, BUCKET, "text/csv")
