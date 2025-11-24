@@ -1,0 +1,447 @@
+version: '3.8'
+
+x-airflow-common: &airflow-common
+  build:
+    context: ./dags
+    dockerfile: Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor #локальный запуск
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres_dag/airflow
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres_dag/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__WEBSERVER__SECRET_KEY: 'your_airflow_webserver_sec_key'
+    AIRFLOW__WEBSERVER__BASE_URL: http://localhost:8090
+    _PIP_ADDITIONAL_REQUIREMENTS: ''
+    AIRFLOW_INPUT_DIR: '/opt/airflow/dag-inputs'
+    AIRFLOW_CONN_CRM_API: "http://bionicpro-crm:3020"
+    AIRFLOW_CONN_RAW_DB: "postgresql://airflow:airflow@telemetry_db:5432/telemetry"
+    AIRFLOW_CONN_OLAP: "postgresql://airflow:airflow@postgres_dag:5432/olap"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./dags/sql:/opt/airflow/dags/sql
+    - ./dags/requirements.txt:/opt/airflow/requirements.txt
+    - ./dags/data:/opt/airflow/sample_files
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres_dag:
+      condition: service_healthy
+  networks:
+    - dag_sample
+
+services:
+  keycloak_db:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: keycloak_db
+      POSTGRES_USER: keycloak_user
+      POSTGRES_PASSWORD: keycloak_password
+    volumes:
+      - ./postgres-keycloak-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - dag_sample
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0.0
+    container_name: keycloak
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak_db:5432/keycloak_db
+      KC_DB_USERNAME: keycloak_user
+      KC_DB_PASSWORD: keycloak_password
+      KC_PROXY: none
+      PROXY_ADDRESS_FORWARDING: true 
+      KC_HTTP_ENABLED: true
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME_STRICT: false
+      KC_HOSTNAME_STRICT_HTTPS: false
+      KC_HTTPS_REQUIRED: none
+    command: 
+      - start-dev
+      - --import-realm
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
+    ports:
+      - "8080:8080"
+    depends_on:
+      - keycloak_db
+    networks:
+      - dag_sample
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:3030
+      REACT_APP_AUTH_URL: http://localhost:3010
+    networks:
+      - dag_sample
+  bionicpro-auth:
+    build:
+      context: ./bionicpro-auth        
+      dockerfile: Dockerfile
+    container_name: bionicpro-auth
+    environment:
+      AUTH_KEYCLOAK_BASE_URL: http://localhost:8080
+      AUTH_KEYCLOAK_REALM: reports-realm
+      AUTH_KEYCLOAK_CLIENT_ID: bionicpro-auth
+      AUTH_KEYCLOAK_CLIENT_SECRET: LLaCe34E5OcwCmQil0sGj62/auBmXZGiM0rHvlYA2Js=
+      AUTH_SESSION_LIFETIME_SECONDS: 600        
+      AUTH_ACCESS_TOKEN_LIFETIME: 120          
+      AUTH_REFRESH_ROTATION: "true"
+    ports:
+      - "3010:3010"
+    depends_on:
+      - keycloak
+    networks:
+      - dag_sample
+  ldap:
+    image: osixia/openldap:1.5.0
+    container_name: openldap
+    command: ["--copy-service", "--loglevel", "debug"]
+    environment:
+      LDAP_ORGANISATION: "BionicPRO"
+      LDAP_DOMAIN: "example.com"
+      LDAP_ADMIN_PASSWORD: admin
+      LDAP_TLS_VERIFY_CLIENT: try
+    ports:
+      - "389:389"
+      - "636:636"
+    volumes:
+      - ./ldap/config.ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom/config.ldif
+    networks:
+      - dag_sample
+  bionicpro-crm:
+    build:
+      context: ./bionicpro-crm        
+      dockerfile: Dockerfile
+    container_name: bionicpro-crm
+    ports:
+      - "3020:3020"
+    networks:
+      - dag_sample
+  crm-db:
+    image: postgres:15
+    container_name: crm-db
+    environment:
+      POSTGRES_USER: crm_user
+      POSTGRES_PASSWORD: crm_password
+      POSTGRES_DB: crm
+    ports:
+      - "5435:5432"
+    volumes:
+      - crm-data:/var/lib/postgresql/data
+      - ./bionicpro-crm/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: >
+      postgres -c wal_level=logical
+              -c max_wal_senders=10
+              -c max_replication_slots=10
+    networks:
+      - dag_sample
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: clickhouse
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: "default"   # пустой пароль
+    ports:
+      - "8123:8123"   # HTTP interface
+      - "9005:9000"   # Native interface
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-config:/etc/clickhouse-server
+      - ./clickhouse/sql:/docker-entrypoint-initdb.d
+    networks:
+      - dag_sample
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - dag_sample
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - dag_sample
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - kafka
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+          sleep 10
+          kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic crm.public.customers --partitions 3 --replication-factor 1
+          kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic telemetry.public.telemetry --partitions 3 --replication-factor 1
+    networks:
+      - dag_sample
+
+  connect:
+    image: debezium/connect:2.5.0.Final
+    container_name: connect
+    depends_on:
+      - kafka
+      - zookeeper
+      - crm-db
+      - telemetry_db
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: connect_config
+      OFFSET_STORAGE_TOPIC: connect_offset
+      STATUS_STORAGE_TOPIC: connect_status
+    volumes:
+      - ./debezium/connectors:/kafka/connectors
+    networks:
+      - dag_sample
+
+  connect-init:
+    image: curlimages/curl:latest
+    depends_on:
+      - connect
+    volumes:
+      - ./debezium/connectors:/kafka/connectors
+      - ./debezium/init-connect.sh:/usr/local/bin/init-connect.sh
+    entrypoint: ["/bin/sh", "/usr/local/bin/init-connect.sh"]
+    networks:
+      - dag_sample
+
+  bionicpro-report:
+    build:
+      context: ./bionicpro-report        
+      dockerfile: Dockerfile
+    container_name: bionicpro-report
+    environment:
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_DEFAULT_BUCKET: reports
+      S3_ADDRESSING_STYLE: path
+      S3_MULTIPART_THRESHOLD: 52428800   # 50MB
+      S3_MULTIPART_CHUNKSIZE: 8388608    # 8MB
+    ports:
+      - "3030:3030"
+    networks:
+      - dag_sample
+    
+  telemetry_db:
+    image: postgres:15
+    container_name: telemetry_db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: telemetry
+    volumes:
+      - ./bionicpro-telemetry/pgdata:/var/lib/postgresql/data
+      - ./bionicpro-telemetry/sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: >
+      postgres -c wal_level=logical
+              -c max_wal_senders=10
+              -c max_replication_slots=10
+    networks:
+      - dag_sample
+  telemetry:
+    build: ./bionicpro-telemetry
+    container_name: telemetry-service
+    depends_on:
+      - telemetry_db
+    environment:
+      DATABASE_URL: postgresql://airflow:airflow@telemetry_db:5432/telemetry
+    ports:
+      - "9100:9100"
+    networks:
+      - dag_sample
+
+  postgres_dag:
+    image: postgres:16.0
+    container_name: postgres_dag
+    volumes:
+      - ./dags/db/init-db.sql:/docker-entrypoint-initdb.d/db.sql
+      - airflow_db_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - pg_isready
+        - -U
+        - airflow
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+    networks:
+      - dag_sample
+  airflow-webserver:
+    <<: *airflow-common
+    ports:
+      - "8090:8080"
+    depends_on:
+      postgres_dag:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: webserver
+    networks:
+      - dag_sample
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  airflow-scheduler:
+    <<: *airflow-common
+    networks:
+      - dag_sample
+    command: scheduler
+    depends_on:
+      postgres_dag:
+        condition: service_healthy
+      airflow-webserver:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8080/health || exit 1" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  airflow-triggerer:
+    <<: *airflow-common
+    depends_on:
+      postgres_dag:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - dag_sample
+    command: bash -c "airflow triggerer"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - airflow jobs check --job-type TriggererJob --hostname "${HOSTNAME}"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+
+  airflow-cli:
+    <<: *airflow-common
+    depends_on:
+      postgres_dag:
+        condition: service_healthy
+    networks:
+      - dag_sample
+    profiles:
+      - debug
+    command:
+      - bash
+      - -c
+      - airflow
+
+  airflow-init:
+    <<: *airflow-common
+    environment:
+      <<: *airflow-common-env
+    depends_on:
+      postgres_dag:
+        condition: service_healthy
+    command: >
+      bash -c " airflow db init && airflow users create \ --username admin \ --firstname admin \ --lastname admin \ --role Admin \ --email admin@sample.ru \ --password admin 
+      
+      "
+    networks:
+      - dag_sample
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_HTTP_TRACE: "-"
+    ports:
+      - "9000:9000"   # S3 API (optional for host access)
+      - "9001:9001"   # Console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - dag_sample
+
+  minio_init:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+        sleep 5 &&
+        mc alias set myminio http://minio:9000 minioadmin minioadmin &&
+        mc mb myminio/reports &&
+        mc anonymous set download myminio/reports
+      "
+    networks:
+      - dag_sample
+  cdn:
+    image: nginx:1.27
+    container_name: cdn
+    environment:
+      MINIO_USER: minioadmin
+      MINIO_PASSWORD: minioadmin
+    volumes:
+      - ./cdn/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./cdn/cache:/var/cache/nginx
+    ports:
+      - "8081:80"   # внешний CDN endpoint
+    depends_on:
+      - minio
+      - bionicpro-auth
+    networks:
+      - dag_sample
+
+networks:
+  dag_sample:
+volumes:
+  airflow_db_data:
+  minio_data:
+  crm-data:
+  clickhouse-data:
+  clickhouse-config:

@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+httpx 
+python-dotenv
+asyncpg
+boto3 
+botocore
+clickhouse_connect
